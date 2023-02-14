@@ -12,56 +12,9 @@ class ExpenseData
     setup_schema
   end
 
-  def command_list
-    result = @connection.exec('SELECT * FROM expenses')
-    display_expenses(result)
+  def all_expenses
+    @connection.exec('SELECT * FROM expenses')
   end
-
-  def command_add(details)
-    unless valid_expense_details?(details)
-      puts 'You must provide an amount and memo.'
-      return nil
-    end
-
-    amount = details[0].to_f.round(2)
-    memo = details[1]
-    date = Date.today
-    insert_expense(amount, memo, date)
-
-    puts 'Expense Added'
-  end
-
-  def command_search(search_term)
-    query = <<-SQL
-      SELECT * FROM expenses
-      WHERE memo ILIKE $1;
-    SQL
-
-    search_results = @connection.exec_params(query, ["%#{search_term}%"])
-    puts search_results.values
-    display_expenses(search_results)
-  end
-
-  def command_delete(id)
-    if !expense_exists?(id)
-      puts "There is no expense with the id '#{id}'"
-    else
-      puts 'The following expense has been deleted'
-      display_expenses(retrieve_expense(id), false)
-      delete_expense(id)
-    end
-  end
-
-  def command_clear
-    puts 'This will remove all expenses. Are you sure? (y/n)'
-    confirmation = STDIN.getch.downcase
-    return unless confirmation == 'y'
-
-    delete_all_expenses
-    puts 'All expenses have been deleted.'
-  end
-
-  private
 
   def delete_all_expenses
     @connection.exec('DELETE FROM expenses;')
@@ -110,20 +63,66 @@ class ExpenseData
     @connection.exec_params(query, [id]).values == [['1']]
   end
 
-  def expenses_sum(expenses)
-    expenses.field_values('amount').map(&:to_f).inject(:+)
+  def search_expenses(search_term)
+    query = <<-SQL
+      SELECT * FROM expenses
+      WHERE memo ILIKE $1;
+    SQL
+
+    @connection.exec_params(query, ["%#{search_term}%"])
+  end
+end
+
+# Validates arguments for commands to read and write onto database
+class Commander
+  def initialize
+    @expense_data = ExpenseData.new
   end
 
-  def number_of_expenses_message(quantity)
-    case quantity
-    when 0
-      'There are no expenses.'
-    when 1
-      'There is 1 expense.'
+  def add(details)
+    unless valid_expense_details?(details)
+      puts 'You must provide an amount and memo.'
+      return nil
+    end
+
+    amount = details[0].to_f.round(2)
+    memo = details[1]
+    date = Date.today
+    @expense_data.insert_expense(amount, memo, date)
+
+    puts 'Expense Added'
+  end
+
+  def clear
+    puts 'This will remove all expenses. Are you sure? (y/n)'
+    confirmation = STDIN.getch.downcase
+    return unless confirmation == 'y'
+
+    @expense_data.delete_all_expenses
+    puts 'All expenses have been deleted.'
+  end
+
+  def list
+    expenses = @expense_data.all_expenses
+    display_expenses(expenses)
+  end
+
+  def delete(id)
+    if !@expense_data.expense_exists?(id)
+      puts "There is no expense with the id '#{id}'"
     else
-      "There are #{quantity} expenses."
+      puts 'The following expense has been deleted'
+      display_expenses(@expense_data.retrieve_expense(id), false)
+      @expense_data.delete_expense(id)
     end
   end
+
+  def search(search_term)
+    results = @expense_data.search_expenses(search_term)
+    display_expenses(results)
+  end
+
+  private
 
   def display_expenses(expenses, with_total = true)
     puts ''
@@ -140,9 +139,13 @@ class ExpenseData
     display_total(expenses) if with_total
   end
 
+  def total_cost(expenses)
+    expenses.field_values('amount').map(&:to_f).inject(:+)
+  end
+
   def display_total(expenses)
     unless expenses.ntuples.zero?
-      sum = expenses_sum(expenses)
+      sum = total_cost(expenses)
       puts '-' * 50
       puts 'Total' + format('%<total>.2f', total: sum).rjust(26)
     end
@@ -154,12 +157,23 @@ class ExpenseData
 
     details[0].to_f != 0.0
   end
+
+  def number_of_expenses_message(quantity)
+    case quantity
+    when 0
+      'There are no expenses.'
+    when 1
+      'There is 1 expense.'
+    else
+      "There are #{quantity} expenses."
+    end
+  end
 end
 
-# taking arguments from user and parsing them into usable input
+# Taking arguments from user sending to appropriate Commander method
 class CLI
   def initialize
-    @expense_data = ExpenseData.new
+    @commander = Commander.new
   end
 
   def run(commands)
@@ -167,15 +181,15 @@ class CLI
 
     case command
     when 'list'
-      @expense_data.command_list
+      @commander.list
     when 'add'
-      @expense_data.command_add(commands[1..-1])
+      @commander.add(commands[1..-1])
     when 'search'
-      @expense_data.command_search(commands[1])
+      @commander.search(commands[1])
     when 'delete'
-      @expense_data.command_delete(commands[1])
+      @commander.delete(commands[1])
     when 'clear'
-      @expense_data.command_clear
+      @commander.clear
     else
       display_help
     end
