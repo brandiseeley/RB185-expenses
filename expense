@@ -1,0 +1,202 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+require 'pg'
+require 'io/console'
+
+# Responsible for interacting with database
+class ExpenseData
+  def initialize
+    @connection = PG.connect(dbname: 'expenses')
+    setup_schema
+  end
+
+  def command_list
+    result = @connection.exec('SELECT * FROM expenses')
+    display_expenses(result)
+  end
+
+  def command_add(details)
+    unless valid_expense_details?(details)
+      puts 'You must provide an amount and memo.'
+      return nil
+    end
+
+    amount = details[0].to_f.round(2)
+    memo = details[1]
+    date = Date.today
+    insert_expense(amount, memo, date)
+
+    puts 'Expense Added'
+  end
+
+  def command_search(search_term)
+    query = <<-SQL
+      SELECT * FROM expenses
+      WHERE memo ILIKE $1;
+    SQL
+
+    search_results = @connection.exec_params(query, ["%#{search_term}%"])
+    puts search_results.values
+    display_expenses(search_results)
+  end
+
+  def command_delete(id)
+    if !expense_exists?(id)
+      puts "There is no expense with the id '#{id}'"
+    else
+      puts 'The following expense has been deleted'
+      display_expenses(retrieve_expense(id), false)
+      delete_expense(id)
+    end
+  end
+
+  def command_clear
+    puts 'This will remove all expenses. Are you sure? (y/n)'
+    confirmation = STDIN.getch.downcase
+    return unless confirmation == 'y'
+
+    delete_all_expenses
+    puts 'All expenses have been deleted.'
+  end
+
+  private
+
+  def delete_all_expenses
+    @connection.exec('DELETE FROM expenses;')
+  end
+
+  def delete_expense(id)
+    query = <<-SQL
+    DELETE FROM expenses
+    WHERE id = $1;
+    SQL
+
+    @connection.exec_params(query, [id])
+  end
+
+  def insert_expense(amount, memo, date)
+    query = <<-SQL
+            INSERT INTO expenses
+            (amount, memo, created_on)
+            VALUES
+            ($1, $2, $3);
+    SQL
+
+    @connection.exec_params(query, [amount, memo, date])
+  end
+
+  def setup_schema
+    query = <<-SQL
+      SELECT COUNT(*) FROM information_schema.tables
+      WHERE table_schema = 'public'
+      AND table_name = 'expenses';
+    SQL
+
+    return unless @connection.exec(query).values == [['0']]
+
+    create_table_query = File.open('./schema.sql', &:read)
+    @connection.exec(create_table_query)
+  end
+
+  def retrieve_expense(id)
+    query = 'SELECT * FROM expenses WHERE id = $1'
+    @connection.exec_params(query, [id])
+  end
+
+  def expense_exists?(id)
+    query = 'SELECT 1 FROM expenses WHERE id = $1'
+    @connection.exec_params(query, [id]).values == [['1']]
+  end
+
+  def expenses_sum(expenses)
+    expenses.field_values('amount').map(&:to_f).inject(:+)
+  end
+
+  def number_of_expenses_message(quantity)
+    case quantity
+    when 0
+      'There are no expenses.'
+    when 1
+      'There is 1 expense.'
+    else
+      "There are #{quantity} expenses."
+    end
+  end
+
+  def display_expenses(expenses, with_total = true)
+    puts ''
+    puts number_of_expenses_message(expenses.ntuples)
+    expenses.each do |tuple|
+      columns = [tuple['id'].rjust(3),
+                 tuple['created_on'].rjust(10),
+                 tuple['amount'].rjust(12),
+                 tuple['memo']]
+
+      puts columns.join(' | ')
+    end
+
+    display_total(expenses) if with_total
+  end
+
+  def display_total(expenses)
+    unless expenses.ntuples.zero?
+      sum = expenses_sum(expenses)
+      puts '-' * 50
+      puts 'Total' + format('%<total>.2f', total: sum).rjust(26)
+    end
+    puts ''
+  end
+
+  def valid_expense_details?(details)
+    return false if details.size != 2
+
+    details[0].to_f != 0.0
+  end
+end
+
+# taking arguments from user and parsing them into usable input
+class CLI
+  def initialize
+    @expense_data = ExpenseData.new
+  end
+
+  def run(commands)
+    command = commands.first
+
+    case command
+    when 'list'
+      @expense_data.command_list
+    when 'add'
+      @expense_data.command_add(commands[1..-1])
+    when 'search'
+      @expense_data.command_search(commands[1])
+    when 'delete'
+      @expense_data.command_delete(commands[1])
+    when 'clear'
+      @expense_data.command_clear
+    else
+      display_help
+    end
+  end
+
+  private
+
+  def display_help
+    puts <<~HELP
+      An expense recording system
+      
+      Commands:
+      
+      add AMOUNT MEMO - record a new expense
+      clear - delete all expenses
+      list - list all expenses
+      delete NUMBER - remove expense with id NUMBER
+      search QUERY - list expenses with a matching memo field
+      
+    HELP
+  end
+end
+
+CLI.new.run(ARGV)
